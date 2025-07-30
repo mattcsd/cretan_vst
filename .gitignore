@@ -1,0 +1,10 @@
+build/
+Binaries/
+DerivedData/
+*.jucer
+*.user
+*.suo
+*.sdf
+*.VC.db
+*.opendb
+.DS_Store
