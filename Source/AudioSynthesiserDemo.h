@@ -356,15 +356,20 @@ public:
 
     void resized() override
     {
-        auto area = getLocalBounds().reduced (8);
-        liveAudioDisplayComp.setBounds (area.removeFromTop (64));
-        keyboardComponent.setBounds (area.removeFromBottom (96));
-
-        auto buttonArea = area.removeFromLeft (150);
-        sineButton.setBounds (buttonArea.removeFromTop (24));
-        sampledButton.setBounds (buttonArea.removeFromTop (24));
-
-        midiInputList.setBounds (area.removeFromTop (24).removeFromLeft (getWidth() / 2));
+        auto area = getLocalBounds().reduced(8);
+        
+        // Give more vertical space to the waveform display (150 pixels instead of 64)
+        liveAudioDisplayComp.setBounds(area.removeFromTop(150));
+        
+        // Adjust the remaining space distribution
+        auto bottomArea = area.removeFromBottom(96); // Keyboard area
+        keyboardComponent.setBounds(bottomArea);
+        
+        // Adjust control panel area
+        auto controlArea = area.removeFromLeft(180); // Slightly wider for better spacing
+        sineButton.setBounds(controlArea.removeFromTop(24).reduced(2));
+        sampledButton.setBounds(controlArea.removeFromTop(24).reduced(2));
+        midiInputList.setBounds(controlArea.removeFromTop(24).reduced(2));
     }
 
 private:
