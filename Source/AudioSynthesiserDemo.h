@@ -174,31 +174,27 @@ struct SynthAudioSource final : public AudioSource
 
     void setUsingSampledSound()
     {
-
-        DBG("BinaryData sample_wavSize: " + juce::String(BinaryData::sample_wavSize));
-
-        const void* data = BinaryData::sample_wav; // Pointer to the binary data
-        int dataSize = BinaryData::sample_wavSize; // Size of the data in bytes
-
-        inputStream = std::make_unique<juce::MemoryInputStream>(data, static_cast<size_t>(dataSize), false);
+        const void* data = BinaryData::sample_wav;
+        int dataSize = BinaryData::sample_wavSize;
+        
+        // Create a new MemoryInputStream each time
+        auto* stream = new juce::MemoryInputStream(data, static_cast<size_t>(dataSize), false);
         juce::WavAudioFormat wavFormat;
-        std::unique_ptr<juce::AudioFormatReader> audioReader(wavFormat.createReaderFor(inputStream.get(), false));
-                            //false anti gia true giati corrupt
-
+        std::unique_ptr<juce::AudioFormatReader> audioReader(wavFormat.createReaderFor(stream, true)); // true = reader will delete the stream
+        
         BigInteger allNotes;
-        allNotes.setRange (0, 128, true);
+        allNotes.setRange(0, 128, true);
 
         synth.clearSounds();
-        synth.addSound (new SamplerSound ("demo sound",
-                                          *audioReader,
-                                          allNotes,
-                                          74,   // root midi note
-                                          0.1,  // attack time
-                                          0.1,  // release time
-                                          10.0  // maximum sample length
-                                          ));
-    }
-        //
+        synth.addSound(new SamplerSound("demo sound",
+                                       *audioReader,
+                                       allNotes,
+                                       74,   // root midi note
+                                       0.1,  // attack time
+                                       0.1,  // release time
+                                       10.0  // maximum sample length
+                                       ));
+    }        //
         /*WavAudioFormat wavFormat;
 
         std::unique_ptr<AudioFormatReader> audioReader (wavFormat.createReaderFor (createAssetInputStream ("cello.wav").release(), true));
@@ -298,6 +294,9 @@ class AudioSynthesiserDemo final : public Component
 public:
     AudioSynthesiserDemo()
     {
+        #ifndef JUCE_DEMO_RUNNER
+        audioDeviceManager.initialise(0, 2, nullptr, true, {}, nullptr);
+        #endif
         addAndMakeVisible (keyboardComponent);
 
         addAndMakeVisible (sineButton);
@@ -338,9 +337,16 @@ public:
 
     ~AudioSynthesiserDemo() override
     {
-        audioSourcePlayer.setSource (nullptr);
-        audioDeviceManager.removeMidiInputDeviceCallback ({}, &(synthAudioSource.midiCollector));
-        audioDeviceManager.removeAudioCallback (&callback);
+        // Stop audio processing first
+        audioDeviceManager.removeAudioCallback(&callback);
+        audioDeviceManager.removeMidiInputDeviceCallback({}, &(synthAudioSource.midiCollector));
+        
+        // Then release the audio source
+        audioSourcePlayer.setSource(nullptr);
+        
+        // Clear any remaining sounds and voices
+        synthAudioSource.synth.clearSounds();
+        synthAudioSource.synth.clearVoices();
     }
 
     void paint (Graphics& g) override
@@ -363,25 +369,28 @@ public:
 
 private:
     // Select your midi device
-    void setMidiInput (int index)
+    void setMidiInput(int index)
     {
         auto list = MidiInput::getAvailableDevices();
+        if (list.isEmpty())
+            return;
 
-        // Disable the previous MIDI input
-        //audioDeviceManager.removeMidiInputDeviceCallback(selectedMidiInput, &(synthAudioSource.midiCollector));
+        // Disable all current MIDI inputs
+        for (auto& input : MidiInput::getAvailableDevices())
+            audioDeviceManager.setMidiInputDeviceEnabled(input.identifier, false);
 
-        auto newInput = list[index];
-        auto selectedMidiInput = newInput.identifier;
+        audioDeviceManager.removeMidiInputDeviceCallback({}, &(synthAudioSource.midiCollector));
 
-        // Enable the new MIDI input
-        audioDeviceManager.setMidiInputDeviceEnabled(selectedMidiInput, true);
-        audioDeviceManager.addMidiInputDeviceCallback(selectedMidiInput, &(synthAudioSource.midiCollector));
+        if (index >= 0 && index < list.size())
+        {
+            auto newInput = list[index];
+            if (! audioDeviceManager.isMidiInputDeviceEnabled(newInput.identifier))
+            {
+                audioDeviceManager.setMidiInputDeviceEnabled(newInput.identifier, true);
+                audioDeviceManager.addMidiInputDeviceCallback(newInput.identifier, &(synthAudioSource.midiCollector));
+            }
+        }
     }
-
-
-
-
-
 
 
 
