@@ -5,7 +5,7 @@
 #include <juce_dsp/juce_dsp.h>  // Include the DSP module
 
 //==============================================================================
-// Proper FFT Analyzer Component using JUCE's DSP module
+// Enhanced FFT Analyzer Component using JUCE's DSP module with proper logarithmic plotting
 class FFTAnalyzer : public Component, private Timer
 {
 public:
@@ -13,6 +13,15 @@ public:
     {
         setOpaque(true);
         startTimerHz(30); // Update at 30 Hz
+        
+        // Add toggle button for scale type
+        addAndMakeVisible(scaleToggle);
+        scaleToggle.setButtonText("Log Scale");
+        scaleToggle.setToggleState(true, dontSendNotification);
+        scaleToggle.onClick = [this] { repaint(); };
+        
+        // Make the component mouse-sensitive for hover
+        setMouseCursor(MouseCursor::CrosshairCursor);
     }
 
     void pushNextSample(float sample) noexcept
@@ -38,15 +47,31 @@ public:
         // Perform FFT
         forwardFFT.performFrequencyOnlyForwardTransform(fftData);
         
+        // Find the peak frequency and magnitude
+        findPeakFrequency();
+        
         // Normalize and convert to dB
         auto mindB = -100.0f;
         auto maxdB = 0.0f;
         
         for (int i = 0; i < scopeSize; ++i)
         {
-            // Map to logarithmic frequency scale
-            auto skewedProportionX = 1.0f - std::exp(std::log(1.0f - (float)i / (float)scopeSize) * 0.2f);
-            auto fftDataIndex = jlimit(0, fftSize / 2, (int)(skewedProportionX * (float)fftSize * 0.5f));
+            float proportion;
+            
+            if (scaleToggle.getToggleState())
+            {
+                // Logarithmic frequency scale
+                proportion = 1.0f - std::exp(std::log(1.0f - (float)i / (float)scopeSize) * 0.2f);
+            }
+            else
+            {
+                // Linear frequency scale
+                proportion = (float)i / (float)scopeSize;
+            }
+            
+            // Limit to 9kHz (assuming 44.1kHz sample rate)
+            auto maxFreqProportion = 9000.0f / 22050.0f; // 9kHz / Nyquist
+            auto fftDataIndex = jlimit(0, fftSize / 2, (int)(proportion * maxFreqProportion * (float)fftSize));
             
             // Get magnitude and convert to dB
             auto level = jmap(jlimit(mindB, maxdB,
@@ -55,6 +80,30 @@ public:
             
             scopeData[i] = level;
         }
+    }
+
+    void findPeakFrequency()
+    {
+        float maxMagnitude = 0.0f;
+        int peakIndex = 0;
+        
+        // Find the bin with maximum magnitude
+        for (int i = 1; i < fftSize / 2; ++i)
+        {
+            if (fftData[i] > maxMagnitude)
+            {
+                maxMagnitude = fftData[i];
+                peakIndex = i;
+            }
+        }
+        
+        // Convert bin index to frequency
+        auto sampleRate = 44100.0f; // You might want to get this dynamically
+        peakFrequency = (peakIndex * sampleRate) / fftSize;
+        peakMagnitude = maxMagnitude;
+        
+        // Update peak time
+        peakDisplayTime = Time::getMillisecondCounter();
     }
 
     void paint(Graphics& g) override
@@ -66,21 +115,36 @@ public:
 
         auto area = getLocalBounds().withTrimmedTop(25).reduced(2);
 
-        // Draw frequency labels (logarithmic scale)
+        // Draw frequency labels based on scale type
         g.setFont(10.0f);
         g.setColour(Colours::grey);
         
-        String freqLabels[] = {"20Hz", "100Hz", "500Hz", "2kHz", "10kHz", "20kHz"};
-        float freqPositions[] = {0.02f, 0.1f, 0.3f, 0.5f, 0.8f, 1.0f};
-        
-        for (int i = 0; i < 6; ++i)
+        if (scaleToggle.getToggleState())
         {
-            auto xPos = area.getX() + area.getWidth() * freqPositions[i];
-            g.drawText(freqLabels[i],
-                      (int)xPos - 25, area.getBottom() - 15, 50, 15, Justification::centred);
+            // Logarithmic frequency labels
+            String freqLabels[] = {"20Hz", "100Hz", "500Hz", "2kHz", "9kHz"};
+            float freqPositions[] = {0.02f, 0.1f, 0.3f, 0.6f, 1.0f};
+            
+            for (int i = 0; i < 5; ++i)
+            {
+                auto xPos = area.getX() + area.getWidth() * freqPositions[i];
+                g.drawText(freqLabels[i],
+                          (int)xPos - 25, area.getBottom() - 15, 50, 15, Justification::centred);
+            }
+        }
+        else
+        {
+            // Linear frequency labels
+            String freqLabels[] = {"0Hz", "2kHz", "4kHz", "6kHz", "9kHz"};
+            for (int i = 0; i < 5; ++i)
+            {
+                auto xPos = area.getX() + area.getWidth() * (i / 4.0f);
+                g.drawText(freqLabels[i],
+                          (int)xPos - 25, area.getBottom() - 15, 50, 15, Justification::centred);
+            }
         }
 
-        // Draw the spectrum
+        // Draw the spectrum with proper scaling
         g.setColour(Colours::cyan);
         
         auto prevX = area.getX();
@@ -88,9 +152,19 @@ public:
         
         for (int i = 0; i < scopeSize; ++i)
         {
-            // Use logarithmic frequency scale for x-axis
-            auto normalizedIndex = 1.0f - std::exp(std::log(1.0f - (float)i / (float)scopeSize) * 0.2f);
-            auto x = area.getX() + area.getWidth() * normalizedIndex;
+            float x;
+            if (scaleToggle.getToggleState())
+            {
+                // Logarithmic x-axis - use the same calculation as in drawNextFrameOfSpectrum
+                auto normalizedIndex = 1.0f - std::exp(std::log(1.0f - (float)i / (float)scopeSize) * 0.2f);
+                x = area.getX() + area.getWidth() * normalizedIndex;
+            }
+            else
+            {
+                // Linear x-axis
+                x = area.getX() + area.getWidth() * ((float)i / (float)scopeSize);
+            }
+            
             auto y = area.getY() + area.getHeight() * (1.0f - scopeData[i]);
             
             if (i > 0)
@@ -112,6 +186,120 @@ public:
             
             g.drawText(dbLabels[i], area.getX() - 35, (int)y - 7, 33, 14, Justification::right);
         }
+
+        // Draw mouse coordinates if hovering
+        if (mousePosition.x >= area.getX() && mousePosition.x <= area.getRight() &&
+            mousePosition.y >= area.getY() && mousePosition.y <= area.getBottom())
+        {
+            drawMouseCoordinates(g, area);
+        }
+
+        // Draw peak frequency label if recent (within 3 seconds)
+        auto currentTime = Time::getMillisecondCounter();
+        if (currentTime - peakDisplayTime < 3000 && peakFrequency > 0)
+        {
+            drawPeakLabel(g, area);
+        }
+    }
+
+    void drawMouseCoordinates(Graphics& g, Rectangle<int> area)
+    {
+        // Convert mouse position to frequency and magnitude
+        float freq, magnitude;
+        getFrequencyAndMagnitudeAtPoint(mousePosition, area, freq, magnitude);
+        
+        // Convert magnitude to dB
+        auto dB = jmap(magnitude, 0.0f, 1.0f, -80.0f, 0.0f);
+        
+        // Create info string
+        String info;
+        if (freq < 1000)
+            info = String(freq, 1) + " Hz, " + String(dB, 1) + " dB";
+        else
+            info = String(freq / 1000.0, 2) + " kHz, " + String(dB, 1) + " dB";
+        
+        // Use larger font
+        Font font(14.0f);
+        auto textWidth = font.getStringWidth(info) + 10;
+        auto textArea = Rectangle<int>(mousePosition.x + 10, mousePosition.y - 10, textWidth, 20);
+        g.setColour(Colours::black.withAlpha(0.7f));
+        g.fillRect(textArea);
+        
+        // Draw text with larger font
+        g.setColour(Colours::white);
+        g.setFont(font);
+        g.drawText(info, textArea, Justification::centred);
+        
+        // Draw crosshair
+        g.setColour(Colours::white.withAlpha(0.5f));
+        g.drawLine(mousePosition.x, area.getY(), mousePosition.x, area.getBottom(), 1.0f);
+        g.drawLine(area.getX(), mousePosition.y, area.getRight(), mousePosition.y, 1.0f);
+    }
+
+    void drawPeakLabel(Graphics& g, Rectangle<int> area)
+    {
+        // Convert peak frequency to x coordinate
+        float x;
+        if (scaleToggle.getToggleState())
+        {
+            // Logarithmic frequency scale (20Hz - 9kHz)
+            float normalizedX = std::log(peakFrequency / 20.0f) / std::log(9000.0f / 20.0f);
+            x = area.getX() + area.getWidth() * normalizedX;
+        }
+        else
+        {
+            // Linear frequency scale (0 - 9kHz)
+            x = area.getX() + area.getWidth() * (peakFrequency / 9000.0f);
+        }
+        
+        // Convert magnitude to y coordinate
+        auto dB = Decibels::gainToDecibels(peakMagnitude) - Decibels::gainToDecibels((float)fftSize);
+        auto normalizedY = jmap(dB, -80.0f, 0.0f, 1.0f, 0.0f);
+        auto y = area.getY() + area.getHeight() * normalizedY;
+        
+        // Draw marker
+        g.setColour(Colours::red);
+        g.fillEllipse(x - 4, y - 4, 8, 8);
+        
+        // Create label
+        String label;
+        if (peakFrequency < 1000)
+            label = String(peakFrequency, 1) + " Hz";
+        else
+            label = String(peakFrequency / 1000.0, 2) + " kHz";
+        
+        // Draw label background
+        Font font(14.0f);
+        auto textWidth = font.getStringWidth(label) + 10;
+        auto textArea = Rectangle<int>(x + 8, y - 10, textWidth, 20);
+        g.setColour(Colours::black.withAlpha(0.7f));
+        g.fillRect(textArea);
+        
+        // Draw label text
+        g.setColour(Colours::yellow);
+        g.setFont(font);
+        g.drawText(label, textArea, Justification::centred);
+    }
+
+    void getFrequencyAndMagnitudeAtPoint(Point<int> point, Rectangle<int> area, float& freq, float& magnitude)
+    {
+        // Convert x position to frequency
+        float normalizedX = (point.x - area.getX()) / (float)area.getWidth();
+        
+        if (scaleToggle.getToggleState())
+        {
+            // Logarithmic frequency scale (20Hz - 9kHz)
+            freq = 20.0f * std::pow(9000.0f / 20.0f, normalizedX);
+        }
+        else
+        {
+            // Linear frequency scale (0 - 9kHz)
+            freq = normalizedX * 9000.0f;
+        }
+        
+        // Convert y position to magnitude
+        float normalizedY = 1.0f - (point.y - area.getY()) / (float)area.getHeight();
+        magnitude = jlimit(0.0f, 1.0f, normalizedY);
     }
 
     void timerCallback() override
@@ -122,6 +310,24 @@ public:
             nextFFTBlockReady = false;
             repaint();
         }
+    }
+
+    void resized() override
+    {
+        // Position the toggle button in top-right corner
+        scaleToggle.setBounds(getWidth() - 100, 2, 90, 18);
+    }
+
+    void mouseMove(const MouseEvent& event) override
+    {
+        mousePosition = event.getPosition();
+        repaint();
+    }
+
+    void mouseExit(const MouseEvent&) override
+    {
+        mousePosition = Point<int>(-1, -1); // Move offscreen
+        repaint();
     }
 
 private:
@@ -140,6 +346,14 @@ private:
     float scopeData[scopeSize];
     int fifoIndex = 0;
     bool nextFFTBlockReady = false;
+
+    ToggleButton scaleToggle;
+    Point<int> mousePosition = Point<int>(-1, -1);
+    
+    // Peak detection
+    float peakFrequency = 0.0f;
+    float peakMagnitude = 0.0f;
+    uint32 peakDisplayTime = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FFTAnalyzer)
 };
