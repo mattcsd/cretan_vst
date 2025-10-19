@@ -1,95 +1,184 @@
-/*
-  ==============================================================================
-
-   This file is part of the JUCE framework examples.
-   Copyright (c) Raw Material Software Limited
-
-   The code included in this file is provided under the terms of the ISC license
-   http://www.isc.org/downloads/software-support-policy/isc-license. Permission
-   to use, copy, modify, and/or distribute this software for any purpose with or
-   without fee is hereby granted provided that the above copyright notice and
-   this permission notice appear in all copies.
-
-   THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
-   REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
-   FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
-   INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
-   LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
-   OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
-   PERFORMANCE OF THIS SOFTWARE.
-
-  ==============================================================================
-*/
-
-/*******************************************************************************
- The block below describes the properties of this PIP. A PIP is a short snippet
- of code that can be read by the Projucer and used to generate a JUCE project.
-
- BEGIN_JUCE_PIP_METADATA
-
- name:             AudioSynthesiserDemo
- version:          1.0.0
- vendor:           JUCE
- website:          http://juce.com
- description:      Simple synthesiser application.
-
- dependencies:     juce_audio_basics, juce_audio_devices, juce_audio_formats,
-                   juce_audio_processors, juce_audio_utils, juce_core,
-                   juce_data_structures, juce_events, juce_graphics,
-                   juce_gui_basics, juce_gui_extra
- exporters:        xcode_mac, vs2022, linux_make, androidstudio, xcode_iphone
-
- moduleFlags:      JUCE_STRICT_REFCOUNTEDPOINTER=1
-
- type:             Component
- mainClass:        AudioSynthesiserDemo
-
- useLocalCopy:     1
-
- END_JUCE_PIP_METADATA
-
-*******************************************************************************/
-
 #pragma once
 
 #include "DemoUtilities.h"
 #include "AudioLiveScrollingDisplay.h"
+#include <juce_dsp/juce_dsp.h>  // Include the DSP module
+
+//==============================================================================
+// Proper FFT Analyzer Component using JUCE's DSP module
+class FFTAnalyzer : public Component, private Timer
+{
+public:
+    FFTAnalyzer() : forwardFFT(fftOrder), window(fftSize, juce::dsp::WindowingFunction<float>::hann)
+    {
+        setOpaque(true);
+        startTimerHz(30); // Update at 30 Hz
+    }
+
+    void pushNextSample(float sample) noexcept
+    {
+        if (fifoIndex == fftSize)
+        {
+            if (!nextFFTBlockReady)
+            {
+                zeromem(fftData, sizeof(fftData));
+                memcpy(fftData, fifo, sizeof(fifo));
+                nextFFTBlockReady = true;
+            }
+            fifoIndex = 0;
+        }
+        fifo[fifoIndex++] = sample;
+    }
+
+    void drawNextFrameOfSpectrum()
+    {
+        // Apply windowing function
+        window.multiplyWithWindowingTable(fftData, fftSize);
+        
+        // Perform FFT
+        forwardFFT.performFrequencyOnlyForwardTransform(fftData);
+        
+        // Normalize and convert to dB
+        auto mindB = -100.0f;
+        auto maxdB = 0.0f;
+        
+        for (int i = 0; i < scopeSize; ++i)
+        {
+            // Map to logarithmic frequency scale
+            auto skewedProportionX = 1.0f - std::exp(std::log(1.0f - (float)i / (float)scopeSize) * 0.2f);
+            auto fftDataIndex = jlimit(0, fftSize / 2, (int)(skewedProportionX * (float)fftSize * 0.5f));
+            
+            // Get magnitude and convert to dB
+            auto level = jmap(jlimit(mindB, maxdB,
+                                   Decibels::gainToDecibels(fftData[fftDataIndex]) - Decibels::gainToDecibels((float)fftSize)),
+                             mindB, maxdB, 0.0f, 1.0f);
+            
+            scopeData[i] = level;
+        }
+    }
+
+    void paint(Graphics& g) override
+    {
+        g.fillAll(Colours::black);
+
+        g.setColour(Colours::white);
+        g.drawText("FFT Spectrum Analysis", getLocalBounds().removeFromTop(20), Justification::centred);
+
+        auto area = getLocalBounds().withTrimmedTop(25).reduced(2);
+
+        // Draw frequency labels (logarithmic scale)
+        g.setFont(10.0f);
+        g.setColour(Colours::grey);
+        
+        String freqLabels[] = {"20Hz", "100Hz", "500Hz", "2kHz", "10kHz", "20kHz"};
+        float freqPositions[] = {0.02f, 0.1f, 0.3f, 0.5f, 0.8f, 1.0f};
+        
+        for (int i = 0; i < 6; ++i)
+        {
+            auto xPos = area.getX() + area.getWidth() * freqPositions[i];
+            g.drawText(freqLabels[i],
+                      (int)xPos - 25, area.getBottom() - 15, 50, 15, Justification::centred);
+        }
+
+        // Draw the spectrum
+        g.setColour(Colours::cyan);
+        
+        auto prevX = area.getX();
+        auto prevY = area.getY() + area.getHeight();
+        
+        for (int i = 0; i < scopeSize; ++i)
+        {
+            // Use logarithmic frequency scale for x-axis
+            auto normalizedIndex = 1.0f - std::exp(std::log(1.0f - (float)i / (float)scopeSize) * 0.2f);
+            auto x = area.getX() + area.getWidth() * normalizedIndex;
+            auto y = area.getY() + area.getHeight() * (1.0f - scopeData[i]);
+            
+            if (i > 0)
+            {
+                g.drawLine(prevX, prevY, (float)x, (float)y, 2.0f);
+            }
+            
+            prevX = x;
+            prevY = y;
+        }
+
+        // Draw grid lines and dB labels
+        g.setColour(Colours::grey.withAlpha(0.3f));
+        String dbLabels[] = {"0dB", "-20dB", "-40dB", "-60dB", "-80dB"};
+        for (int i = 0; i < 5; ++i)
+        {
+            auto y = area.getY() + (area.getHeight() * i) / 4;
+            g.drawHorizontalLine(y, float(area.getX()), float(area.getRight()));
+            
+            g.drawText(dbLabels[i], area.getX() - 35, (int)y - 7, 33, 14, Justification::right);
+        }
+    }
+
+    void timerCallback() override
+    {
+        if (nextFFTBlockReady)
+        {
+            drawNextFrameOfSpectrum();
+            nextFFTBlockReady = false;
+            repaint();
+        }
+    }
+
+private:
+    enum
+    {
+        fftOrder = 11,
+        fftSize = 1 << fftOrder,
+        scopeSize = 512
+    };
+
+    juce::dsp::FFT forwardFFT;
+    juce::dsp::WindowingFunction<float> window;
+
+    float fifo[fftSize];
+    float fftData[2 * fftSize];
+    float scopeData[scopeSize];
+    int fifoIndex = 0;
+    bool nextFFTBlockReady = false;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FFTAnalyzer)
+};
 
 //==============================================================================
 /** Our demo synth sound is just a basic sine wave.. */
 struct SineWaveSound final : public SynthesiserSound
 {
-    bool appliesToNote (int /*midiNoteNumber*/) override    { return true; }
-    bool appliesToChannel (int /*midiChannel*/) override    { return true; }
+    bool appliesToNote(int /*midiNoteNumber*/) override    { return true; }
+    bool appliesToChannel(int /*midiChannel*/) override    { return true; }
 };
 
 //==============================================================================
 /** Our demo synth voice just plays a sine wave.. */
 struct SineWaveVoice final : public SynthesiserVoice
 {
-    bool canPlaySound (SynthesiserSound* sound) override
+    bool canPlaySound(SynthesiserSound* sound) override
     {
-        return dynamic_cast<SineWaveSound*> (sound) != nullptr;
+        return dynamic_cast<SineWaveSound*>(sound) != nullptr;
     }
 
-    void startNote (int midiNoteNumber, float velocity,
+    void startNote(int midiNoteNumber, float velocity,
                     SynthesiserSound*, int /*currentPitchWheelPosition*/) override
     {
         currentAngle = 0.0;
         level = velocity * 0.15;
         tailOff = 0.0;
 
-        auto cyclesPerSecond = MidiMessage::getMidiNoteInHertz (midiNoteNumber);
+        auto cyclesPerSecond = MidiMessage::getMidiNoteInHertz(midiNoteNumber);
         auto cyclesPerSample = cyclesPerSecond / getSampleRate();
 
         angleDelta = cyclesPerSample * MathConstants<double>::twoPi;
     }
 
-    void stopNote (float /*velocity*/, bool allowTailOff) override
+    void stopNote(float /*velocity*/, bool allowTailOff) override
     {
         if (allowTailOff)
         {
-            if (approximatelyEqual (tailOff, 0.0))
+            if (approximatelyEqual(tailOff, 0.0))
                 tailOff = 1.0;
         }
         else
@@ -99,21 +188,21 @@ struct SineWaveVoice final : public SynthesiserVoice
         }
     }
 
-    void pitchWheelMoved (int /*newValue*/) override                              {}
-    void controllerMoved (int /*controllerNumber*/, int /*newValue*/) override    {}
+    void pitchWheelMoved(int /*newValue*/) override                              {}
+    void controllerMoved(int /*controllerNumber*/, int /*newValue*/) override    {}
 
-    void renderNextBlock (AudioBuffer<float>& outputBuffer, int startSample, int numSamples) override
+    void renderNextBlock(AudioBuffer<float>& outputBuffer, int startSample, int numSamples) override
     {
-        if (! approximatelyEqual (angleDelta, 0.0))
+        if (!approximatelyEqual(angleDelta, 0.0))
         {
             if (tailOff > 0.0)
             {
                 while (--numSamples >= 0)
                 {
-                    auto currentSample = (float) (std::sin (currentAngle) * level * tailOff);
+                    auto currentSample = (float)(std::sin(currentAngle) * level * tailOff);
 
                     for (auto i = outputBuffer.getNumChannels(); --i >= 0;)
-                        outputBuffer.addSample (i, startSample, currentSample);
+                        outputBuffer.addSample(i, startSample, currentSample);
 
                     currentAngle += angleDelta;
                     ++startSample;
@@ -123,7 +212,6 @@ struct SineWaveVoice final : public SynthesiserVoice
                     if (tailOff <= 0.005)
                     {
                         clearCurrentNote();
-
                         angleDelta = 0.0;
                         break;
                     }
@@ -133,10 +221,10 @@ struct SineWaveVoice final : public SynthesiserVoice
             {
                 while (--numSamples >= 0)
                 {
-                    auto currentSample = (float) (std::sin (currentAngle) * level);
+                    auto currentSample = (float)(std::sin(currentAngle) * level);
 
                     for (auto i = outputBuffer.getNumChannels(); --i >= 0;)
-                        outputBuffer.addSample (i, startSample, currentSample);
+                        outputBuffer.addSample(i, startSample, currentSample);
 
                     currentAngle += angleDelta;
                     ++startSample;
@@ -155,12 +243,13 @@ private:
 // This is an audio source that streams the output of our demo synth.
 struct SynthAudioSource final : public AudioSource
 {
-    SynthAudioSource (MidiKeyboardState& keyState)  : keyboardState (keyState)
+    SynthAudioSource(MidiKeyboardState& keyState, FFTAnalyzer& fftAnalyzerIn)
+        : keyboardState(keyState), fftAnalyzer(fftAnalyzerIn)
     {
         for (auto i = 0; i < 4; ++i)
         {
-            synth.addVoice (new SineWaveVoice());
-            synth.addVoice (new SamplerVoice());
+            synth.addVoice(new SineWaveVoice());
+            synth.addVoice(new SamplerVoice());
         }
 
         setUsingSineWaveSound();
@@ -169,7 +258,7 @@ struct SynthAudioSource final : public AudioSource
     void setUsingSineWaveSound()
     {
         synth.clearSounds();
-        synth.addSound (new SineWaveSound());
+        synth.addSound(new SineWaveSound());
     }
 
     void setUsingSampledSound()
@@ -180,7 +269,7 @@ struct SynthAudioSource final : public AudioSource
         // Create a new MemoryInputStream each time
         auto* stream = new juce::MemoryInputStream(data, static_cast<size_t>(dataSize), false);
         juce::WavAudioFormat wavFormat;
-        std::unique_ptr<juce::AudioFormatReader> audioReader(wavFormat.createReaderFor(stream, true)); // true = reader will delete the stream
+        std::unique_ptr<juce::AudioFormatReader> audioReader(wavFormat.createReaderFor(stream, true));
         
         BigInteger allNotes;
         allNotes.setRange(0, 128, true);
@@ -194,76 +283,75 @@ struct SynthAudioSource final : public AudioSource
                                        0.1,  // release time
                                        10.0  // maximum sample length
                                        ));
-    }        //
-        /*WavAudioFormat wavFormat;
+    }
 
-        std::unique_ptr<AudioFormatReader> audioReader (wavFormat.createReaderFor (createAssetInputStream ("cello.wav").release(), true));
-
-        BigInteger allNotes;
-        allNotes.setRange (0, 128, true);
-
-        synth.clearSounds();
-        synth.addSound (new SamplerSound ("demo sound",
-                                          *audioReader,
-                                          allNotes,
-                                          74,   // root midi note
-                                          0.1,  // attack time
-                                          0.1,  // release time
-                                          10.0  // maximum sample length
-                                          ));
-    */
-
-    void prepareToPlay (int /*samplesPerBlockExpected*/, double sampleRate) override
+    void prepareToPlay(int /*samplesPerBlockExpected*/, double sampleRate) override
     {
-        midiCollector.reset (sampleRate);
-
-        synth.setCurrentPlaybackSampleRate (sampleRate);
+        midiCollector.reset(sampleRate);
+        synth.setCurrentPlaybackSampleRate(sampleRate);
     }
 
     void releaseResources() override {}
 
-    void getNextAudioBlock (const AudioSourceChannelInfo& bufferToFill) override
+    void getNextAudioBlock(const AudioSourceChannelInfo& bufferToFill) override
     {
         bufferToFill.clearActiveBufferRegion();
 
         MidiBuffer incomingMidi;
-        midiCollector.removeNextBlockOfMessages (incomingMidi, bufferToFill.numSamples);
+        midiCollector.removeNextBlockOfMessages(incomingMidi, bufferToFill.numSamples);
 
-        keyboardState.processNextMidiBuffer (incomingMidi, 0, bufferToFill.numSamples, true);
+        keyboardState.processNextMidiBuffer(incomingMidi, 0, bufferToFill.numSamples, true);
 
-        synth.renderNextBlock (*bufferToFill.buffer, incomingMidi, 0, bufferToFill.numSamples);
+        synth.renderNextBlock(*bufferToFill.buffer, incomingMidi, 0, bufferToFill.numSamples);
+
+        // Feed audio to FFT analyzer (use first channel)
+        auto* channelData = bufferToFill.buffer->getReadPointer(0);
+        for (int i = 0; i < bufferToFill.numSamples; ++i)
+            fftAnalyzer.pushNextSample(channelData[i]);
     }
 
     MidiMessageCollector midiCollector;
     MidiKeyboardState& keyboardState;
     Synthesiser synth;
+    FFTAnalyzer& fftAnalyzer;
 
-    private:
-        std::unique_ptr<juce::MemoryInputStream> inputStream;
-
+private:
+    std::unique_ptr<juce::MemoryInputStream> inputStream;
 };
 
 //==============================================================================
+// Modified Callback to fix display scaling
 class Callback final : public AudioIODeviceCallback
 {
 public:
-    Callback (AudioSourcePlayer& playerIn, LiveScrollingAudioDisplay& displayIn)
-        : player (playerIn), display (displayIn) {}
+    Callback(AudioSourcePlayer& playerIn, LiveScrollingAudioDisplay& displayIn)
+        : player(playerIn), display(displayIn) {}
 
-    void audioDeviceIOCallbackWithContext (const float* const* inputChannelData,
+    void audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
                                            int numInputChannels,
                                            float* const* outputChannelData,
                                            int numOutputChannels,
                                            int numSamples,
                                            const AudioIODeviceCallbackContext& context) override
     {
-        player.audioDeviceIOCallbackWithContext (inputChannelData,
+        player.audioDeviceIOCallbackWithContext(inputChannelData,
                                                  numInputChannels,
                                                  outputChannelData,
                                                  numOutputChannels,
                                                  numSamples,
                                                  context);
-        display.audioDeviceIOCallbackWithContext (outputChannelData,
+        
+        // Create a scaled copy for the display to prevent visual clipping
+        AudioBuffer<float> displayBuffer(numOutputChannels, numSamples);
+        for (int channel = 0; channel < numOutputChannels; ++channel)
+        {
+            auto* source = outputChannelData[channel];
+            auto* dest = displayBuffer.getWritePointer(channel);
+            for (int i = 0; i < numSamples; ++i)
+                dest[i] = source[i] * 0.45f; // Scale down for display
+        }
+        
+        display.audioDeviceIOCallbackWithContext(displayBuffer.getArrayOfReadPointers(),
                                                   numOutputChannels,
                                                   nullptr,
                                                   0,
@@ -271,10 +359,10 @@ public:
                                                   context);
     }
 
-    void audioDeviceAboutToStart (AudioIODevice* device) override
+    void audioDeviceAboutToStart(AudioIODevice* device) override
     {
-        player.audioDeviceAboutToStart (device);
-        display.audioDeviceAboutToStart (device);
+        player.audioDeviceAboutToStart(device);
+        display.audioDeviceAboutToStart(device);
     }
 
     void audioDeviceStopped() override
@@ -297,42 +385,45 @@ public:
         #ifndef JUCE_DEMO_RUNNER
         audioDeviceManager.initialise(0, 2, nullptr, true, {}, nullptr);
         #endif
-        addAndMakeVisible (keyboardComponent);
+        addAndMakeVisible(keyboardComponent);
 
-        addAndMakeVisible (sineButton);
-        sineButton.setRadioGroupId (321);
-        sineButton.setToggleState (true, dontSendNotification);
+        addAndMakeVisible(sineButton);
+        sineButton.setRadioGroupId(321);
+        sineButton.setToggleState(true, dontSendNotification);
         sineButton.onClick = [this] { synthAudioSource.setUsingSineWaveSound(); };
 
-        addAndMakeVisible (sampledButton);
-        sampledButton.setRadioGroupId (321);
+        addAndMakeVisible(sampledButton);
+        sampledButton.setRadioGroupId(321);
         sampledButton.onClick = [this] { synthAudioSource.setUsingSampledSound(); };
 
-        addAndMakeVisible (midiInputListLabel);
-        midiInputListLabel.setText ("MIDI Input:", dontSendNotification);
-        midiInputListLabel.attachToComponent (&midiInputList, true);
+        addAndMakeVisible(midiInputListLabel);
+        midiInputListLabel.setText("MIDI Input:", dontSendNotification);
+        midiInputListLabel.attachToComponent(&midiInputList, true);
 
-        addAndMakeVisible (midiInputList);
-        midiInputList.onChange = [this] { setMidiInput (midiInputList.getSelectedId() - 1); };
+        addAndMakeVisible(midiInputList);
+        midiInputList.onChange = [this] { setMidiInput(midiInputList.getSelectedId() - 1); };
 
         auto midiInputs = MidiInput::getAvailableDevices();
         for (auto i = 0; i < midiInputs.size(); ++i)
-            midiInputList.addItem (midiInputs[i].name, i + 1);
+            midiInputList.addItem(midiInputs[i].name, i + 1);
 
-        midiInputList.setSelectedId (1);
+        midiInputList.setSelectedId(1);
 
-        addAndMakeVisible (liveAudioDisplayComp);
-        audioSourcePlayer.setSource (&synthAudioSource);
+        // Add both displays
+        addAndMakeVisible(liveAudioDisplayComp);
+        addAndMakeVisible(fftAnalyzer);
+
+        audioSourcePlayer.setSource(&synthAudioSource);
 
        #ifndef JUCE_DEMO_RUNNER
-        audioDeviceManager.initialise (0, 2, nullptr, true, {}, nullptr);
+        audioDeviceManager.initialise(0, 2, nullptr, true, {}, nullptr);
        #endif
 
-        audioDeviceManager.addAudioCallback (&callback);
-        audioDeviceManager.addMidiInputDeviceCallback ({}, &(synthAudioSource.midiCollector));
+        audioDeviceManager.addAudioCallback(&callback);
+        audioDeviceManager.addMidiInputDeviceCallback({}, &(synthAudioSource.midiCollector));
 
-        setOpaque (true);
-        setSize (640, 480);
+        setOpaque(true);
+        setSize(640, 600); // Increased height to accommodate both displays
     }
 
     ~AudioSynthesiserDemo() override
@@ -349,24 +440,25 @@ public:
         synthAudioSource.synth.clearVoices();
     }
 
-    void paint (Graphics& g) override
+    void paint(Graphics& g) override
     {
-        g.fillAll (getUIColourIfAvailable (LookAndFeel_V4::ColourScheme::UIColour::windowBackground));
+        g.fillAll(getUIColourIfAvailable(LookAndFeel_V4::ColourScheme::UIColour::windowBackground));
     }
 
     void resized() override
     {
         auto area = getLocalBounds().reduced(8);
         
-        // Give more vertical space to the waveform display (150 pixels instead of 64)
+        // Give equal vertical space to both displays (150 pixels each)
         liveAudioDisplayComp.setBounds(area.removeFromTop(150));
+        fftAnalyzer.setBounds(area.removeFromTop(150));
         
         // Adjust the remaining space distribution
         auto bottomArea = area.removeFromBottom(96); // Keyboard area
         keyboardComponent.setBounds(bottomArea);
         
         // Adjust control panel area
-        auto controlArea = area.removeFromLeft(180); // Slightly wider for better spacing
+        auto controlArea = area.removeFromLeft(180);
         sineButton.setBounds(controlArea.removeFromTop(24).reduced(2));
         sampledButton.setBounds(controlArea.removeFromTop(24).reduced(2));
         midiInputList.setBounds(controlArea.removeFromTop(24).reduced(2));
@@ -389,15 +481,13 @@ private:
         if (index >= 0 && index < list.size())
         {
             auto newInput = list[index];
-            if (! audioDeviceManager.isMidiInputDeviceEnabled(newInput.identifier))
+            if (!audioDeviceManager.isMidiInputDeviceEnabled(newInput.identifier))
             {
                 audioDeviceManager.setMidiInputDeviceEnabled(newInput.identifier, true);
                 audioDeviceManager.addMidiInputDeviceCallback(newInput.identifier, &(synthAudioSource.midiCollector));
             }
         }
     }
-
-
 
     AudioDeviceManager audioDeviceManager;
 
@@ -406,7 +496,8 @@ private:
 
     MidiKeyboardState keyboardState;
     AudioSourcePlayer audioSourcePlayer;
-    SynthAudioSource synthAudioSource { keyboardState };
+    FFTAnalyzer fftAnalyzer;
+    SynthAudioSource synthAudioSource { keyboardState, fftAnalyzer };
     MidiKeyboardComponent keyboardComponent { keyboardState, MidiKeyboardComponent::horizontalKeyboard };
 
     ToggleButton sineButton { "Use sine wave" };
@@ -416,5 +507,5 @@ private:
 
     Callback callback { audioSourcePlayer, liveAudioDisplayComp };
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioSynthesiserDemo)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioSynthesiserDemo)
 };
